@@ -1,0 +1,17 @@
+# Azure Functions Python Dependencies
+# ==================================
+
+# Azure Functions SDK
+azure-functions>=1.17.0
+
+# Azure Identity for managed identity authentication
+azure-identity>=1.15.0
+
+# Azure Storage Blob SDK for SAS URL generation
+azure-storage-blob>=12.19.0
+
+# HTTP client for Video Indexer API calls
+requests>=2.31.0
+
+# Azure Cognitive Search SDK for indexing documents
+azure-search-documents>=11.4.0

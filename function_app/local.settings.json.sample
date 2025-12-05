@@ -1,0 +1,15 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage__accountName": "<your-storage-account-name>",
+    "AzureWebJobsSecretStorageType": "Files",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AZURE_VIDEO_INDEXER_ACCOUNT_ID": "<your-video-indexer-account-id>",
+    "AZURE_VIDEO_INDEXER_LOCATION": "<your-video-indexer-location>",
+    "AZURE_VIDEO_INDEXER_ACCOUNT_NAME": "<your-video-indexer-account-name>",
+    "AZURE_SUBSCRIPTION_ID": "<your-azure-subscription-id>",
+    "AZURE_RESOURCE_GROUP": "<your-resource-group>",
+    "MANAGED_IDENTITY_CLIENT_ID": "<your-managed-identity-client-id>",
+    "STORAGE_ACCOUNT_NAME": "<your-storage-account-name>"
+  }
+}
