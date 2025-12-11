@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+/function_app/scripts/
+/scripts/
+
 local.settings.json
 
 # Distribution / packaging

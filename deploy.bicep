@@ -291,6 +291,10 @@ resource functionApp 'Microsoft.Web/sites@2024-11-01' = {
           value: 'https://${searchService.name}.search.windows.net'
         }
         {
+          name: 'AZURE_SEARCH_INDEX_NAME'
+          value: 'videos'
+        }
+        {
           name: 'AZURE_VIDEO_INDEXER_ACCOUNT_ID'
           value: videoIndexer.properties.accountId
         }
@@ -318,6 +322,10 @@ resource functionApp 'Microsoft.Web/sites@2024-11-01' = {
           name: 'STORAGE_ACCOUNT_NAME'
           value: storageAccount.name
         }
+        {
+          name: 'FUNCTION_APP_URL'
+          value: 'https://${functionAppName}.azurewebsites.net'
+        }
       ]
     }
   }
@@ -341,12 +349,34 @@ resource storageBlobDataContributorRole 'Microsoft.Authorization/roleAssignments
   }
 }
 
+// Storage Blob Data Delegator for Managed Identity (required for User Delegation SAS)
+resource storageBlobDataDelegatorRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, managedIdentity.id, 'Storage Blob Data Delegator')
+  scope: storageAccount
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'db58b8e5-c6ad-4a2a-8342-4190687cbf4a')
+    principalId: managedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 // Cognitive Services OpenAI User for Managed Identity (for Function App)
 resource cognitiveServicesOpenAiUserRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(openAiAccount.id, managedIdentity.id, 'Cognitive Services OpenAI User')
   scope: openAiAccount
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')
+    principalId: managedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Search Index Data Contributor for Managed Identity (required to upload documents)
+resource searchDataContributorRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(searchService.id, managedIdentity.id, 'Search Index Data Contributor')
+  scope: searchService
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7ca78c08-252a-4471-8644-bb5ff32d4ba0')
     principalId: managedIdentity.properties.principalId
     principalType: 'ServicePrincipal'
   }

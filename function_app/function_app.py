@@ -1,12 +1,20 @@
 import os
 import logging
+import json
+
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
+from typing import Any, Dict, List, Optional
 
 import azure.functions as func
 import requests
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
+from azure.search.documents import SearchClient
+from pprint import pprint
+from VideoIndexerClient import VideoIndexerClient
+from consts import Consts
+from create_index import create_video_search_index
 
 app = func.FunctionApp()
 
@@ -16,48 +24,44 @@ VIDEO_INDEXER_LOCATION = os.environ.get("AZURE_VIDEO_INDEXER_LOCATION", "westus3
 MANAGED_IDENTITY_CLIENT_ID = os.environ.get("MANAGED_IDENTITY_CLIENT_ID")
 STORAGE_ACCOUNT_NAME = os.environ.get("STORAGE_ACCOUNT_NAME")
 BLOB_SAS_VERSION = os.environ.get("AZURE_STORAGE_SAS_VERSION", "2022-11-02")
+AZURE_SEARCH_ENDPOINT = os.environ.get("AZURE_SEARCH_ENDPOINT")
+AZURE_SEARCH_INDEX_NAME = os.environ.get("AZURE_SEARCH_INDEX_NAME")
+FUNCTION_APP_URL = os.environ.get("FUNCTION_APP_URL")
+AZURE_VIDEO_INDEXER_ACCOUNT_NAME = os.environ.get("AZURE_VIDEO_INDEXER_ACCOUNT_NAME")
+AZURE_SUBSCRIPTION_ID = os.environ.get("AZURE_SUBSCRIPTION_ID")
+AZURE_RESOURCE_GROUP = os.environ.get("AZURE_RESOURCE_GROUP")
 
 # Constants
 CONTAINER_NAME = "dr-videos"
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".wmv", ".mkv", ".webm", ".flv"}
 
 # Azure Video Indexer API endpoints
-VIDEO_INDEXER_API_URL = "https://api.videoindexer.ai"
-ARM_ACCESS_TOKEN_URL = (
-    "https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/"
-    "{resource_group}/providers/Microsoft.VideoIndexer/accounts/{account_name}/"
-    "generateAccessToken?api-version=2024-01-01"
-)
+#VIDEO_INDEXER_API_URL = "https://api.videoindexer.ai"
+#ARM_ACCESS_TOKEN_URL = (
+#    "https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/"
+#    "{resource_group}/providers/Microsoft.VideoIndexer/accounts/{account_name}/"
+#    "generateAccessToken?api-version=2024-01-01"
+#)
 
 # Shared credential instance (supports Managed Identity in Azure, developer creds locally)
 _credential = DefaultAzureCredential(managed_identity_client_id=MANAGED_IDENTITY_CLIENT_ID)
 
-logging.basicConfig(level=logging.INFO)
+# Create Consts instance for Video Indexer client
+consts_config = Consts(
+    ApiVersion="2024-01-01",
+    ApiEndpoint="https://api.videoindexer.ai",
+    AzureResourceManager="https://management.azure.com",
+    AccountName=AZURE_VIDEO_INDEXER_ACCOUNT_NAME,
+    ResourceGroup=AZURE_RESOURCE_GROUP,
+    SubscriptionId=AZURE_SUBSCRIPTION_ID
+)
+
 logger = logging.getLogger(__name__)
 
-def get_video_indexer_access_token() -> str:
-    """Get an access token for Azure Video Indexer using managed identity."""
-    logger.info("Getting Video Indexer access token.")
-    arm_token = _credential.get_token("https://management.azure.com/.default").token
+logger.info("Azure Search Endpoint: %s", AZURE_SEARCH_ENDPOINT)
+logger.info("Azure Search Index Name: %s", AZURE_SEARCH_INDEX_NAME)
 
-    subscription_id = os.environ.get("AZURE_SUBSCRIPTION_ID")
-    resource_group = os.environ.get("AZURE_RESOURCE_GROUP")
-    account_name = os.environ.get("AZURE_VIDEO_INDEXER_ACCOUNT_NAME")
-
-    url = ARM_ACCESS_TOKEN_URL.format(
-        subscription_id=subscription_id,
-        resource_group=resource_group,
-        account_name=account_name,
-    )
-    headers = {"Authorization": f"Bearer {arm_token}", "Content-Type": "application/json"}
-    body = {"permissionType": "Contributor", "scope": "Account"}
-
-    response = requests.post(url, headers=headers, json=body, timeout=30)
-    response.raise_for_status()
-
-    logger.info("🎉 Obtained Video Indexer access token successfully.")
-    return response.json()["accessToken"]
-
+create_video_search_index(AZURE_SEARCH_ENDPOINT, AZURE_SEARCH_INDEX_NAME, _credential)
 
 def get_blob_sas_url(blob_name: str) -> str:
     """Generate a SAS URL for the blob to be used by Video Indexer."""
@@ -85,51 +89,170 @@ def get_blob_sas_url(blob_name: str) -> str:
     )
 
     logger.info("🎉 Generated SAS URL for blob successfully.")
+    logger.info(f"🔍 SAS URL: {account_url}/{CONTAINER_NAME}/{blob_name}?{sas_token}")
     return f"{account_url}/{CONTAINER_NAME}/{blob_name}?{sas_token}"
 
-
-def submit_video_to_indexer(video_url: str, video_name: str) -> dict:
-    """Submit a video to Azure AI Video Indexer for processing."""
-    logger.info(f"🔧 Submitting video '{video_name}' to Azure AI Video Indexer.")
-
-    access_token = get_video_indexer_access_token()
-    upload_url = f"{VIDEO_INDEXER_API_URL}/{VIDEO_INDEXER_LOCATION}/Accounts/{VIDEO_INDEXER_ACCOUNT_ID}/Videos"
-
-    # Decode so requests encodes exactly once
-    video_url_param = unquote(video_url)
-    params = {
-        "accessToken": access_token,
-        "name": video_name,
-        "privacy": "Private",
-        "language": "auto",
-        "indexingPreset": "Default",
-        "streamingPreset": "Default",
-        "videoUrl": video_url_param,
-    }
-    headers = {"Content-Type": "application/json"}
-
-    # Optional preflight check for diagnosing URL reachability
+def _time_to_seconds(value: Optional[str]) -> Optional[float]:
+    """Convert a hh:mm:ss.f time string to seconds (float)."""
+    if value is None:
+        return None
     try:
-        head_resp = requests.head(video_url_param, timeout=10)
-        logger.info(f"🔎 HEAD status: {head_resp.status_code}")
-        if head_resp.status_code >= 300:
-            logger.error(f"HEAD headers: {head_resp.headers}")
-            logger.error(f"HEAD body: {head_resp.text}")
-    except Exception as preflight_err:
-        logger.warning(f"⚠️ Preflight HEAD to blob failed: {preflight_err}")
+        parts = str(value).split(":")
+        parts = [float(p) for p in parts]
+        while len(parts) < 3:
+            parts.insert(0, 0.0)
+        hours, minutes, seconds = parts[-3], parts[-2], parts[-1]
+        return hours * 3600 + minutes * 60 + seconds
+    except Exception:
+        return None
+    
+def _extract_transcript_entries(index_json: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract transcript entries with timestamps and speaker info."""
+    transcripts: List[Dict[str, Any]] = []
+    
+    # Get transcript from videos[0].insights
+    videos = index_json.get("videos") or []
+    if videos and videos[0].get("insights"):
+        transcript_data = videos[0]["insights"].get("transcript", [])
+        
+        for entry in transcript_data:
+            text = entry.get("text")
+            if not text:
+                continue
+            
+            instances = entry.get("instances") or []
+            start = end = None
+            if instances:
+                start = instances[0].get("start") or instances[0].get("adjustedStart")
+                end = instances[0].get("end") or instances[0].get("adjustedEnd")
+            
+            # Build entry, only including fields with valid values
+            transcript_entry = {"text": text}
+            
+            start_seconds = _time_to_seconds(start)
+            if start_seconds is not None:
+                transcript_entry["startSeconds"] = start_seconds
+            
+            end_seconds = _time_to_seconds(end)
+            if end_seconds is not None:
+                transcript_entry["endSeconds"] = end_seconds
+            
+            speaker_id = entry.get("speakerId")
+            if speaker_id is not None:
+                transcript_entry["speakerId"] = speaker_id
+            
+            confidence = entry.get("confidence")
+            if confidence is not None:
+                transcript_entry["confidence"] = confidence
+            
+            transcripts.append(transcript_entry)
+    
+    return transcripts
 
-    response = requests.post(upload_url, params=params, headers=headers, timeout=60)
-    logger.debug(f"Video Indexer request URL: {response.request.url}")
-    logger.info(f"🤓 Video Indexer response status: {response.status_code}")
+def _collect_names(items: List[Dict[str, Any]], name_field: str = "name") -> List[str]:
+    """Extract names from a list of items."""
+    names: List[str] = []
+    for item in items or []:
+        name = item.get(name_field)
+        if name:
+            names.append(name)
+    return names
 
-    if response.status_code >= 300:
-        logger.error(f"🤔 Video Indexer response body: {response.text}")
+def build_search_document(index_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Map Video Indexer insights JSON into the Azure AI Search document shape."""
+    video_id = index_json.get("id")
+    videos = index_json.get("videos", [])
+    video_insights = videos[0].get("insights", {}) if videos else {}
+    summarized = index_json.get("summarizedInsights", {})
+    
+    # Extract transcript entries
+    transcript_entries = _extract_transcript_entries(index_json)
+    transcript_text = " ".join([t.get("text", "") for t in transcript_entries]).strip() or None
+    
+    # Extract keywords, topics, faces, labels
+    keywords = _collect_names(summarized.get("keywords", []))
+    topics = _collect_names(summarized.get("topics", []))
+    faces = _collect_names(summarized.get("faces", []))
+    labels = _collect_names(summarized.get("labels", []))
+    
+    # Extract OCR text
+    ocr_entries = video_insights.get("ocr", [])
+    ocr_texts = [entry.get("text") for entry in ocr_entries if entry.get("text")]
+    ocr_text = " ".join(ocr_texts) if ocr_texts else None
+    
+    # Get duration
+    duration = index_json.get("durationInSeconds") or summarized.get("duration", {}).get("seconds")
+    
+    # Get speaker count
+    speakers = video_insights.get("speakers", [])
+    speaker_count = len(speakers) if speakers else 0
+    
+    # Get language
+    language = video_insights.get("language") or video_insights.get("sourceLanguage")
+    
+    # Get published URL and thumbnail
+    published_url = videos[0].get("publishedUrl") if videos else None
+    thumbnail_id = videos[0].get("thumbnailId") if videos else None
+    
+    # Build the document - match the ACTUAL Azure Search index schema
+    # Note: transcriptEntries is Collection(ComplexType), others are Edm.String
+    document = {
+        "id": video_id,
+        "videoId": video_id,
+        "name": index_json.get("name"),
+        "transcript": transcript_text,
+        "transcriptEntries": transcript_entries,  # Keep as array - schema expects Collection(ComplexType)
+        "keywords": ", ".join(keywords) if keywords else "",  # Convert to string - schema expects Edm.String
+        "topics": ", ".join(topics) if topics else "",  # Convert to string - schema expects Edm.String
+        "faces": ", ".join(faces) if faces else "",  # Convert to string - schema expects Edm.String
+        "labels": ", ".join(labels) if labels else "",  # Convert to string - schema expects Edm.String
+        "ocr": ocr_text,
+        "duration": duration,
+        "created": index_json.get("created"),
+        "language": language,
+        "speakerCount": speaker_count,
+        "publishedUrl": published_url,
+        "thumbnailId": thumbnail_id,
+        "indexedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    
+    return document
 
-    response.raise_for_status()
 
-    result = response.json()
-    logger.info(f"🎉 Video submitted successfully. Video ID: {result.get('id')}")
-    return result
+def upload_to_search_index(index_json: Dict[str, Any]) -> bool:
+    """Upload video insights to Azure AI Search."""
+    if not AZURE_SEARCH_ENDPOINT or not AZURE_SEARCH_INDEX_NAME:
+        logger.warning("⚠️ Azure Search not configured - skipping upload")
+        return False
+    
+    try:
+        # Build the search document
+        document = build_search_document(index_json)
+        video_id = document["id"]
+        
+        logger.info(f"📄 Building search document for video {video_id}")
+        
+        # Create search client and upload
+        search_client = SearchClient(
+            endpoint=AZURE_SEARCH_ENDPOINT,
+            index_name=AZURE_SEARCH_INDEX_NAME,
+            credential=_credential
+        )
+        
+        result = search_client.upload_documents(documents=[document])
+        
+        # Check if upload succeeded
+        if result and result[0].succeeded:
+            logger.info(f"✅ Successfully uploaded video {video_id} to search index")
+            return True
+        else:
+            error_msg = result[0].error_message if result else "Unknown error"
+            logger.error(f"❌ Failed to upload video {video_id}: {error_msg}")
+            return False
+            
+    except Exception as e:
+        logger.exception(f"❌ Error uploading to search index: {e}")
+        return False
 
 
 @app.blob_trigger(arg_name="blob", path=f"{CONTAINER_NAME}/{{blobname}}", connection="AzureWebJobsStorage")
@@ -147,11 +270,56 @@ def process_video_blob(blob: func.InputStream):
         logger.warning(f"⛔ Skipping non-video file: {blob_name}")
         return
 
-    blob_sas_url = get_blob_sas_url(blob_name)
-    # Log URL without SAS token to avoid leaking secrets
-    logger.info(f"🎉 Generated SAS URL for blob: {blob_name}")
+    # Download the blob to a temporary file
+    logger.info(f"📥 Downloading blob: {blob_name}")
+    blob_client = BlobServiceClient(
+        account_url=f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net",
+        credential=_credential
+    ).get_blob_client(container=CONTAINER_NAME, blob=blob_name)
+    
+    # Create temp file path
+    import tempfile
+    temp_dir = tempfile.gettempdir()
+    temp_file_path = os.path.join(temp_dir, blob_name)
+    
+    # Download blob to temp file
+    with open(temp_file_path, "wb") as temp_file:
+        download_stream = blob_client.download_blob()
+        temp_file.write(download_stream.readall())
+    
+    logger.info(f"✅ Downloaded blob to: {temp_file_path}")
 
-    result = submit_video_to_indexer(blob_sas_url, blob_name)
-    logger.info(f"🎉 Successfully submitted video '{blob_name}' to Video Indexer")
-    logger.info(f"Video Indexer ID: {result.get('id')}")
-    logger.info(f"Video Indexer State: {result.get('state')}")
+    # create Video Indexer Client
+    client = VideoIndexerClient()
+
+    # Get access tokens (arm and Video Indexer account)
+    client.authenticate(consts_config)
+    client.get_account()
+
+    ExcludedAI = []
+    
+    # Upload the file directly instead of using URL
+    logger.info(f"📤 Uploading file to Video Indexer: {blob_name}")
+    video_id = client.file_upload(temp_file_path, blob_name, ExcludedAI)
+    
+    # Clean up temp file
+    os.remove(temp_file_path)
+    logger.info(f"🧹 Cleaned up temp file: {temp_file_path}")
+
+    logger.info(f"🎉 Video uploaded successfully. Video ID: {video_id}.")
+    logger.info("⏳ Waiting for Video Indexer to process the video...")
+    result = client.wait_for_index(video_id)
+
+    if result:
+        logger.info("🎉 Video processing completed successfully.")
+        
+        # Get the video insights
+        insights = client.get_video(video_id)
+        
+        # Upload to Azure AI Search
+        upload_to_search_index(insights)
+    else:
+        logger.error("🤔 Video processing failed.")
+        return
+    
+    # Now that we have the results of the video processing, we can add it to the search index.

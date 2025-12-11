@@ -10,6 +10,9 @@
     "AZURE_SUBSCRIPTION_ID": "<your-azure-subscription-id>",
     "AZURE_RESOURCE_GROUP": "<your-resource-group>",
     "MANAGED_IDENTITY_CLIENT_ID": "<your-managed-identity-client-id>",
-    "STORAGE_ACCOUNT_NAME": "<your-storage-account-name>"
+    "STORAGE_ACCOUNT_NAME": "<your-storage-account-name>",
+    "AZURE_SEARCH_ENDPOINT": "https://<your-search>.search.windows.net",
+    "AZURE_SEARCH_INDEX_NAME": "<your-search-name>",
+    "FUNCTION_APP_URL": "https://<your-func>.azurewebsites.net"
   }
 }
